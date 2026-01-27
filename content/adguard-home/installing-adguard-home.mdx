@@ -1,0 +1,240 @@
+---
+title: Installing AdGuard Home
+---
+In my Home Lab, I want to install 3 services prior to other applications, as these will become essential to the secure access of all future applications. This includes a local DNS server, a reverse proxy, and Identity Provider to give SSO access to my applications. In this guide I'll go over my setup of my AdGuard Home service via ocker compose.
+
+### Prerequisites
+
+* A running server (preferably Linux, I am using Ubuntu Server which is lightweight)
+  [https://ubuntu.com/tutorials/install-ubuntu-server#1-overview](https://ubuntu.com/tutorials/install-ubuntu-server#1-overview)
+* Install Docker
+  [https://docs.docker.com/engine/install/ubuntu/](https://docs.docker.com/engine/install/ubuntu/)
+* Install Docker Compose
+  [https://docs.docker.com/compose/install/linux/](https://docs.docker.com/compose/install/linux/)
+* Install OpenSSH Client
+  [https://ubuntu.com/server/docs/openssh-server](https://ubuntu.com/server/docs/openssh-server)
+
+## AdGuard Home
+
+Instructions followed from the Ad Guard Documentation, and modified to meet my needs:
+[https://hub.docker.com/r/adguard/adguardhome](https://hub.docker.com/r/adguard/adguardhome)
+
+### Create or `cd` into your docker directory:
+
+```
+mkdir docker
+cd docker
+```
+
+### Pull the image (use the desired tag instead of latest):
+
+```
+docker pull adguard/adguardhome:v0.107.70
+```
+
+### Create directories for persistent configuration and data
+
+"The image exposes two volumes for data and configuration persistence. You should create a data directory on a suitable volume on your host system, e.g. `/my/own/workdir`, and a configuration directory on a suitable volume on your host system, e.g. `/my/own/confdir`." Navigate to the directory where you want to store your container files, and run these commands.
+
+```
+mkdir adguardhome
+cd adguardhome
+mkdir workdir confdir
+```
+
+### Docker Run Command
+
+This is the command is given in the AdGuard Home Docker Hub to create a new container and run AdGuard Home. I did not want to start my Docker container this way, I wanted these configurations to be codified in a `docker-compose` file. Do not run this command and skip to the [#Construct docker-compose.yaml file](#construct-docker-composeyaml-file) file section, I just left this in for reference in how this command is converted to a `docker-compose` file:
+
+```bash
+docker run --name adguardhome\
+    --restart unless-stopped\
+    -v /my/own/workdir:/opt/adguardhome/work\
+    -v /my/own/confdir:/opt/adguardhome/conf\
+    -p 53:53/tcp -p 53:53/udp\
+    -p 67:67/udp -p 68:68/udp\
+    -p 80:80/tcp -p 443:443/tcp -p 443:443/udp -p 3000:3000/tcp\
+    -p 853:853/tcp\
+    -p 784:784/udp -p 853:853/udp -p 8853:8853/udp\
+    -p 5443:5443/tcp -p 5443:5443/udp\
+    -d adguard/adguardhome
+
+```
+
+### Construct docker-compose.yaml file
+
+Deploying this container via docker-compose will allow me to keep my parameters in a IaC format so that I could easily redeploy this container in any environment, or make updates/changes to my container easily.
+
+I then removed the port mappings, as when you use docker network in host mode, the port mapping array is irrelevant as the container will bind to the same ports as the host. This run command translated to a compose file looks like this:
+
+#### docker-compose.yml
+
+```yaml
+services:
+  adguardhome:
+    image: adguard/adguardhome:v0.107.53
+    container_name: adguardhome
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ${DOCKERDIR}/adguardhome/workdir:/opt/adguardhome/work
+      - ${DOCKERDIR}/adguardhome/confdir:/opt/adguardhome/conf
+```
+
+You will need to either replace `${DOCKERDIR}` with your hardcoded directory path, or place a .env file inside the same directory as your docker-compose file as I did. Here is how you should format it:
+
+#### .env
+
+```
+DOCKERDIR=~/docker
+```
+
+Here is how your files should be nested. If you plan to commit this to a git repository (which I will be upon installing my self-hosted git repository), then you will want to include a `.gitignore` file to be sure you do not commit your `.env` file to your repository for best practice.
+
+```
+docker_directory/
+├── .gitignore
+└── adguardhome/
+    ├── .env
+    ├── docker-compose.yml
+    ├── work/
+    └── conf/
+```
+
+#### .gitignore
+
+```
+.env
+```
+
+### Deploy your Docker Container!
+
+Now that your docker-compose file is constructed, you can deploy your application by running the command:
+
+```
+sudo docker-compose up -d
+```
+
+Upon completion of this command, your Ad Guard Home Container will be live! It should be accessible at the following address:
+
+```
+http://<your-ubuntu-server-ip>:3000
+```
+
+If there was no configuration errors, you should be greeted with the following splash screen:
+
+![AdGuardHomeSplashScreen.png](/adguard-home/attachments/adguardhomesplashscreen.png)
+
+## Initial Configuration
+
+### Admin Web Interface
+
+If you plan to deploy Traefik, it's in your best interest to map the Admin Web Interface to a different port other than 80 to avoid routing conflicts with your Traefik service. I'd recommend choosing something like `800` or `8080`. I set my Admin Web Interface to listen to all interfaces on port `8080`. This means that after this is configured, you will not access on port 3000 anymore, you will access on port `8080`. I will primarily access from the IP of my Ubuntu VM, and this will be the address I use for others to point to the DNS server.
+
+### DNS Server
+
+You will probably see an error stating `validating ports: listen tcp 0.0.0.0:53: bind: address already in use`. You should see a link bringing you to this page and follow these instructions to solve this ([https://adguard-dns.io/kb/adguard-home/faq/#bindinuse](https://adguard-dns.io/kb/adguard-home/faq/#bindinuse)). I posted these instructions as of the time of this post in the section below. If you do not see this then you can skip to the next section (`Static IP Address`).
+
+![Port53Binding.png](/adguard-home/attachments/port53binding.png)
+
+### Unbind port 53
+
+(This section is directly from Ad Guard documentation)
+
+This happens because the port 53 on localhost, which is used for DNS, is already taken by another program. Ubuntu comes with a local DNS called `systemd-resolved`, which uses the address `127.0.0.53:53`, thus preventing AdGuard Home from binding to `127.0.0.1:53`. You can see this by running:
+
+```
+sudo lsof -i :53
+```
+
+The output should be similar to:
+
+```
+COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+systemd-r 14542 systemd-resolve 13u IPv4 86178 0t0 UDP 127.0.0.53:domain
+systemd-r 14542 systemd-resolve 14u IPv4 86179 0t0 TCP 127.0.0.53:domain
+```
+
+To fix this, you must either disable the `systemd-resolved` daemon or choose a different network interface and bind your AdGuard Home to an accessible IP address on it, such as the IP address of your router inside your network. But if you do need to listen on `localhost`, there are several solutions.
+
+Firstly, AdGuard Home can detect such configurations and disable `systemd-resolved` for you if you press the *Fix* button located next to the `address already in use` message on the installation screen. (This button did not appear for me)
+
+Secondly, if that doesn’t work, follow the instructions below. Note that if you’re using AdGuard Home with docker or snap, you’ll have to do this yourself.
+
+1. Create the `/etc/systemd/resolved.conf.d` directory, if necessary:
+
+```
+sudo mkdir -p /etc/systemd/resolved.conf.d
+```
+
+2. Deactivate `DNSStubListener` and update DNS server address. To do that, create a new file, `/etc/systemd/resolved.conf.d/adguardhome.conf`, with the following content:
+
+```
+[Resolve]
+DNS=127.0.0.1
+DNSStubListener=no
+```
+
+Specifying `127.0.0.1` as the DNS server address is necessary. Otherwise the nameserver will be `127.0.0.53` which won’t work without DNSStubListener.
+
+3. Activate another `resolv.conf` file:
+
+```
+sudo mv /etc/resolv.conf /etc/resolv.conf.backup
+sudo ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+```
+
+4. Restart `DNSStubListener`:
+
+```
+sudo systemctl reload-or-restart systemd-resolved
+```
+
+After that, `systemd-resolved` shouldn’t be shown in the output of `lsof`, and AdGuard Home should be able to bind to `127.0.0.1:53`.
+
+### Static IP Address
+
+I have already previously set a static IP for my Ubuntu VM in my Unifi Network OS console. I will not go into detail on that here as everyone's DHCP settings will differ based on the hardware you have. Just ensure you have set an IP that is outside of your DHCP range for your subnet. I will also continue to use UniFi as my DHCP server.
+
+### Authentication
+
+Establish your admin username and password and store in your current password manager.
+
+### Configure Your Devices
+
+To start using this service for all devices throughout your home, you will need change your DNS settings for your network. For Unifi, you do this by going to Settings -> Networks -> Your network name, then scroll down to `DHCP Service Management` and click `Show Options`.  Scroll down to the DNS server settings and place your new Ad Guard Server IP as the 1st/primary DNS server. I still set standard Quad9 (`9.9.9.9`) and Cloudflare (`1.1.1.1`) as my 2nd/3rd DNS servers so I do not bring down my home network if there are issues with the container.
+
+### Upstream DNS Settings
+
+At this point your Ad Guard Home is ready to use! There is a default block list and upstream DNS server listed. I changed my Upstream DNS servers by going to Settings -> DNS Settings. Ad Guard Home gives you a link of DNS providers that you can choose from yourself. I watched through NetworkChuck's AdGuard Home video and he made a great recommendation to utilize these servers that take advantage of DNS-over-HTTPS (DoH):
+
+```
+https://dns.quad9.net/dns-query
+https://dns.cloudflare.com/dns-query
+```
+
+I will just be using the Quad9 and Cloudflare DNS providers. These provide DNS services over an encrypted HTTPS connection, which makes your queries and responses unreadable to unauthorized parties. Ensure you scroll down to hit apply after this.
+
+### DNS Server Configuration
+
+Scroll down further in the settings until you reach `DNS server configuration`. You should see a checkbox that says `Enable DNSSEC`. As long as you entered the addresses above for your upstream provider (or chose your own that is DNSSEC-enabled), then you will be able to enable this setting. Ensure you hit save afterwards.
+
+### General Settings
+
+Under general settings, you can have your network have parental controls to block adult material, or have ad guard enforce safe for search engines. I also enabled `Statistics configuration` to have 90 days retention.
+
+### DNS Blocklists
+
+Navigate to Filters -> DNS Blocklists. You should see a default list already added, on the bottom left you should have the option to add more blocklists. Scroll through the list and apply those that you want enabled in your home! There are some dedicated to phising, spam and malware. Clicking on the information button next to them will show you what is in the blocklist as well as a description.
+
+### Enjoy ad free content throughout your entire network
+
+There are many more setting that you can configure that I did not go over in this tutorial. But this will get you started and remove unwanted Ads from your home! I plan to go back to the DNS Rewrite section after I configure my reverse proxy. We will use this section to construct CNAME records to point to our local services.
+
+#### References
+
+[https://www.youtube.com/watch?v=B2V\_8M9cjYw](https://www.youtube.com/watch?v=B2V_8M9cjYw)
+[https://ubuntu.com/tutorials/install-ubuntu-server#1-overview](https://ubuntu.com/tutorials/install-ubuntu-server#1-overview)
+[https://docs.docker.com/engine/install/ubuntu/](https://docs.docker.com/engine/install/ubuntu/)
+[https://docs.docker.com/compose/install/linux/](https://docs.docker.com/compose/install/linux/)
+[https://ubuntu.com/server/docs/openssh-server](https://ubuntu.com/server/docs/openssh-server)
