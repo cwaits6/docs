@@ -75,7 +75,7 @@ Resources:
       FunctionConfig:
         Comment: Redirect www to apex
         Runtime: cloudfront-js-1.0
-      FunctionCode: |
+      FunctionCode: !Sub |
         function handler(event) {
           var request = event.request;
           var host = request.headers.host.value;
