@@ -5,15 +5,27 @@ Parameters:
   SiteDomain:
     Type: String
     Description: Apex domain, e.g. example.com
-  WwwDomain:
-    Type: String
-    Description: WWW domain, e.g. www.example.com
   HostedZoneId:
     Type: String
     Description: Route53 hosted zone ID for the apex domain
   AcmCertArn:
     Type: String
     Description: ACM cert ARN in us-east-1 for CloudFront
+  CreateOIDCProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Set to "false" if a GitHub OIDC provider already exists in this account
+  GitHubOrg:
+    Type: String
+    Description: GitHub organization or username
+  GitHubRepo:
+    Type: String
+    Default: docs
+    Description: GitHub repository name
+
+Conditions:
+  ShouldCreateOIDCProvider: !Equals [!Ref CreateOIDCProvider, "true"]
 
 Resources:
   SiteBucket:
@@ -42,7 +54,6 @@ Resources:
         Enabled: true
         Aliases:
           - !Ref SiteDomain
-          - !Ref WwwDomain
         DefaultRootObject: index.html
         ViewerCertificate:
           AcmCertificateArn: !Ref AcmCertArn
@@ -51,45 +62,16 @@ Resources:
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt SiteBucket.RegionalDomainName
-            S3OriginConfig: {}
             OriginAccessControlId: !Ref OriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ""
         DefaultCacheBehavior:
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
           AllowedMethods: [GET, HEAD]
           CachedMethods: [GET, HEAD]
           Compress: true
-          ForwardedValues:
-            QueryString: false
-            Cookies:
-              Forward: none
-          FunctionAssociations:
-            - EventType: viewer-request
-              FunctionARN: !GetAtt WwwRedirectFunction.FunctionMetadata.FunctionARN
-
-  WwwRedirectFunction:
-    Type: AWS::CloudFront::Function
-    Properties:
-      Name: !Sub "${SiteDomain}-www-redirect"
-      AutoPublish: true
-      FunctionConfig:
-        Comment: Redirect www to apex
-        Runtime: cloudfront-js-1.0
-      FunctionCode: |
-        function handler(event) {
-          var request = event.request;
-          var host = request.headers.host.value;
-          if (host === "${WwwDomain}") {
-            return {
-              statusCode: 301,
-              statusDescription: "Moved Permanently",
-              headers: {
-                location: { value: "https://${SiteDomain}" + request.uri }
-              }
-            };
-          }
-          return request;
-        }
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
 
   BucketPolicy:
     Type: AWS::S3::BucketPolicy
@@ -128,25 +110,49 @@ Resources:
         DNSName: !GetAtt SiteDistribution.DomainName
         HostedZoneId: Z2FDTNDATAQYW2
 
-  WwwRecordA:
-    Type: AWS::Route53::RecordSet
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOIDCProvider
     Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref WwwDomain
-      Type: A
-      AliasTarget:
-        DNSName: !GetAtt SiteDistribution.DomainName
-        HostedZoneId: Z2FDTNDATAQYW2
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - ffffffffffffffffffffffffffffffffffffffff
 
-  WwwRecordAAAA:
-    Type: AWS::Route53::RecordSet
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
     Properties:
-      HostedZoneId: !Ref HostedZoneId
-      Name: !Ref WwwDomain
-      Type: AAAA
-      AliasTarget:
-        DNSName: !GetAtt SiteDistribution.DomainName
-        HostedZoneId: Z2FDTNDATAQYW2
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main"
+      Policies:
+        - PolicyName: DeployStaticSite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${SiteBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt SiteBucket.Arn
+              - Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution}"
 
 Outputs:
   BucketName:
@@ -155,3 +161,5 @@ Outputs:
     Value: !Ref SiteDistribution
   DistributionDomain:
     Value: !GetAtt SiteDistribution.DomainName
+  GitHubActionsRoleArn:
+    Value: !GetAtt GitHubActionsRole.Arn
